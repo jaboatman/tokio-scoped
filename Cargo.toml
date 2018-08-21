@@ -1,0 +1,8 @@
+[package]
+name = "tokio-scoped"
+version = "0.1.0"
+authors = ["Jason Boatman <jason.boatman@multiscalehn.com>"]
+
+[dependencies]
+tokio = "0.1"
+futures = "0.1"
