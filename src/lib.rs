@@ -19,6 +19,18 @@ pub struct Scope<'a> {
     _marker: PhantomData<&'a ()>,
 }
 
+impl<'a> Scope<'a> {
+    fn new(exec: TaskExecutor) -> Scope<'a> {
+        let (s, r) = mpsc::channel(0);
+        Scope {
+            exec,
+            send: ManuallyDrop::new(s),
+            recv: Some(r),
+            _marker: PhantomData,
+        }
+    }
+}
+
 impl ScopedRuntime {
     pub fn new(rt: tokio::runtime::Runtime) -> Self {
         ScopedRuntime { rt }
@@ -27,14 +39,8 @@ impl ScopedRuntime {
     where
         F: FnOnce(&mut Scope<'a>) -> R,
     {
-        let (s, r) = mpsc::channel(0);
-        let mut s = Scope {
-            exec: self.rt.executor(),
-            send: ManuallyDrop::new(s),
-            recv: Some(r),
-            _marker: PhantomData,
-        };
-        f(&mut s)
+        let mut scope = Scope::new(self.rt.executor());
+        f(&mut scope)
     }
 }
 
@@ -90,6 +96,15 @@ impl<'a> Scope<'a> {
         self.exec.spawn(boxed);
         rx.wait().unwrap()
     }
+
+    pub fn scope<'inner, F, R>(&'inner self, f: F) -> R
+    where
+        F: FnOnce(&mut Scope<'inner>) -> R,
+        'a: 'inner,
+    {
+        let mut scope = Scope::new(self.exec.clone());
+        f(&mut scope)
+    }
 }
 
 impl<'a> Drop for Scope<'a> {
@@ -99,7 +114,7 @@ impl<'a> Drop for Scope<'a> {
         }
 
         let recv = self.recv.take().unwrap();
-        self.block_on(recv.for_each(|_| futures::empty())).ok();
+        recv.wait().next();
     }
 }
 
@@ -206,5 +221,24 @@ mod testing {
         });
 
         assert_eq!(&values, &[2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn inner_scope_test() {
+        let scoped = make_runtime();
+        let mut values = vec![1, 2, 3, 4];
+        scoped.scope(|scope| {
+            let mut v2s = vec![2, 3, 4, 5];
+            scope.scope(|scope2| {
+                scope2.spawn(lazy(|| {
+                    v2s.push(100);
+                    values.push(100);
+                    Ok(())
+                }));
+            });
+            // The inner scope must exit before we can get here.
+            assert_eq!(v2s, &[2, 3, 4, 5, 100]);
+            assert_eq!(values, &[1, 2, 3, 4, 100]);
+        });
     }
 }
