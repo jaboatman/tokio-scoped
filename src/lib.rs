@@ -105,6 +105,11 @@ impl<'a> Scope<'a> {
         let mut scope = Scope::new(self.exec.clone());
         f(&mut scope)
     }
+
+    /// Get a `TaskExecutor` to the underlying `Runtime` instance.
+    pub fn executor(&self) -> TaskExecutor {
+        self.exec.clone()
+    }
 }
 
 impl<'a> Drop for Scope<'a> {
