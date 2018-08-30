@@ -1,3 +1,30 @@
+//! A scoped [`tokio`] Runtime that can be used to create `scopes` which can spawn futures which
+//! can access stack data. That is, the futures spawned by the `scope` do not require the `'static`
+//! lifetime bound. This can be done safely by ensuring that the `scope` doesn't exit until all
+//! spawned futures have finished executing.
+//!
+//! # Example
+//! ```
+//! # extern crate tokio_scoped;
+//! # extern crate futures;
+//! # use futures::lazy;
+//!
+//! let mut v = String::from("Hello");
+//! tokio_scoped::scope(|scope| {
+//!     // Use the scope to spawn the future.
+//!     scope.spawn(lazy(|| {
+//!         v.push('!');
+//!         Ok(())
+//!     }));
+//! });
+//! // The scope won't exit until all spawned futures are complete.
+//! assert_eq!(v.as_str(), "Hello!");
+//! ```
+//!
+//! See also [`crossbeam::scope`]
+//!
+//! [`tokio`]: https://tokio.rs/
+//! [`crossbeam::scope`]: https://docs.rs/crossbeam/0.4.1/crossbeam/fn.scope.html
 extern crate futures;
 extern crate tokio;
 
@@ -8,6 +35,39 @@ use std::mem::ManuallyDrop;
 use std::ops::Deref;
 use tokio::runtime::TaskExecutor;
 
+/// Creates a [`ScopedRuntime`] and calls the `scope` method with `f` on it.
+///
+/// # Example
+/// ```
+/// # extern crate tokio_scoped;
+/// # extern crate futures;
+/// # use futures::lazy;
+///
+/// let mut v = String::from("Hello");
+/// tokio_scoped::scope(|scope| {
+///     // Use the scope to spawn the future.
+///     scope.spawn(lazy(|| {
+///         v.push('!');
+///         Ok(())
+///     }));
+/// });
+/// // The scope won't exit until all spawned futures are complete.
+/// assert_eq!(v.as_str(), "Hello!");
+/// ```
+pub fn scope<'a, F, R>(f: F) -> R
+where
+    F: FnOnce(&mut Scope<'a>) -> R,
+{
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut scope = Scope::new(rt.executor());
+    f(&mut scope)
+}
+
+/// Wrapper type around a tokio Runtime which can be used to create `Scope`s.
+///
+/// See also the [`scope`] function.
+///
+/// [`scope`]: /tokio-scoped/fn.scope.html
 pub struct ScopedRuntime {
     rt: tokio::runtime::Runtime,
 }
@@ -15,6 +75,9 @@ pub struct ScopedRuntime {
 pub struct Scope<'a> {
     exec: TaskExecutor,
     send: ManuallyDrop<mpsc::Sender<()>>,
+    // When the `Scope` is dropped, we wait on this receiver to close. No messages are sent through
+    // the receiver, however, the `Sender` objects get cloned into each spawned future (see
+    // `ScopedFuture`). This is how we ensure they all exit eventually.
     recv: Option<mpsc::Receiver<()>>,
     _marker: PhantomData<&'a ()>,
 }
@@ -42,6 +105,13 @@ impl ScopedRuntime {
         let mut scope = Scope::new(self.rt.executor());
         f(&mut scope)
     }
+
+    /// Consumes the `ScopedRuntime` and returns the inner [`Runtime`] variable.
+    ///
+    /// [`Runtime`]: https://docs.rs/tokio/0.1.8/tokio/runtime/struct.Runtime.html
+    pub fn into_inner(self) -> tokio::runtime::Runtime {
+        self.rt
+    }
 }
 
 struct ScopedFuture {
@@ -64,6 +134,9 @@ impl<'a> Scope<'a> {
         'a: 's,
     {
         let boxed: Box<Future<Item = (), Error = ()> + Send + 'a> = Box::new(f);
+        // This transmute should be safe, as we use the `ScopedFuture` abstraction to prevent the
+        // scope from exiting until every spawned `ScopedFuture` object is dropped, signifying that
+        // they have completed their execution.
         let boxed: Box<Future<Item = (), Error = ()> + Send + 'static> =
             unsafe { std::mem::transmute(boxed) };
         ScopedFuture {
@@ -71,6 +144,10 @@ impl<'a> Scope<'a> {
             _marker: self.send.deref().clone(),
         }
     }
+
+    /// Spawn the received future on the [`ScopedRuntime`] which was used to create `self`.
+    ///
+    /// [`ScopedRuntime`]: /tokio-scoped/struct.ScopedRuntime.html
     pub fn spawn<'s, F>(&'s mut self, future: F) -> &mut Self
     where
         F: Future<Item = (), Error = ()> + Send + 'a,
@@ -81,6 +158,8 @@ impl<'a> Scope<'a> {
         self
     }
 
+    /// Blocks the "current thread" of the runtime until `future` resolves. Other spawned futures
+    /// can make progress while this future is running.
     pub fn block_on<'s, R, E, F>(&'s mut self, future: F) -> Result<R, E>
     where
         F: Future<Item = R, Error = E> + Send + 'a,
@@ -97,6 +176,7 @@ impl<'a> Scope<'a> {
         rx.wait().unwrap()
     }
 
+    /// Creates an `inner` scope which can access variables created within the outer scope.
     pub fn scope<'inner, F, R>(&'inner self, f: F) -> R
     where
         F: FnOnce(&mut Scope<'inner>) -> R,
@@ -119,7 +199,8 @@ impl<'a> Drop for Scope<'a> {
         }
 
         let recv = self.recv.take().unwrap();
-        recv.wait().next();
+        let n = recv.wait().next();
+        assert_eq!(n, None);
     }
 }
 
@@ -197,6 +278,26 @@ mod testing {
     }
 
     #[test]
+    fn access_mut_stack_scope_fn() {
+        let mut uncopy = String::from("Borrowed");
+        let mut uncopy2 = String::from("Borrowed");
+        ::scope(|scope| {
+            scope.spawn(lazy(|| {
+                uncopy.push('!');
+                Ok(())
+            }));
+
+            scope.spawn(lazy(|| {
+                uncopy2.push('f');
+                Ok(())
+            }));
+        });
+
+        assert_eq!(uncopy.as_str(), "Borrowed!");
+        assert_eq!(uncopy2.as_str(), "Borrowedf");
+    }
+
+    #[test]
     fn block_on_test() {
         let scoped = make_runtime();
         let mut uncopy = String::from("Borrowed");
@@ -205,7 +306,8 @@ mod testing {
                 .block_on(lazy(|| {
                     uncopy.push('!');
                     Ok::<_, ()>(uncopy)
-                })).unwrap();
+                }))
+                .unwrap();
             assert_eq!(v.as_str(), "Borrowed!");
             v
         });

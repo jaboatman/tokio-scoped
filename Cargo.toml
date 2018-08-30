@@ -1,7 +1,7 @@
 [package]
 name = "tokio-scoped"
 version = "0.1.0"
-authors = ["Jason Boatman <jason.boatman@multiscalehn.com>"]
+authors = ["Jason Boatman <jasonaboatman@gmail.com>"]
 
 [dependencies]
 tokio = "0.1"
