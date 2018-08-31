@@ -1,7 +1,9 @@
-//! A scoped [`tokio`] Runtime that can be used to create `scopes` which can spawn futures which
-//! can access stack data. That is, the futures spawned by the `scope` do not require the `'static`
-//! lifetime bound. This can be done safely by ensuring that the `scope` doesn't exit until all
-//! spawned futures have finished executing.
+//! A scoped [`tokio`] Runtime that can be used to create [`Scope`]s which can spawn futures which
+//! can access stack data. That is, the futures spawned by the [`Scope`] do not require the `'static`
+//! lifetime bound. This can be done safely by ensuring that the [`Scope`] doesn't exit until all
+//! spawned futures have finished executing. Be aware, that when a [`Scope`] exits it will block
+//! until every future spawned by the [`Scope`] completes. Therefore, one should take caution when
+//! created scopes within an asynchronous context, such as from within another spawned future.
 //!
 //! # Example
 //! ```
@@ -63,15 +65,52 @@ where
     f(&mut scope)
 }
 
-/// Wrapper type around a tokio Runtime which can be used to create `Scope`s.
+/// Borrows the Runtime to construct a `ScopeBuilder` which can be used to create a scope.
+///
+/// # Example
+/// ```
+/// # extern crate tokio_scoped;
+/// # extern crate futures;
+/// # extern crate tokio;
+/// # use futures::lazy;
+///
+/// let mut v = String::from("Hello");
+/// let rt = tokio::runtime::Runtime::new().unwrap();
+/// tokio_scoped::scoped(&rt).scope(|scope| {
+///     // Use the scope to spawn the future.
+///     scope.spawn(lazy(|| {
+///         v.push('!');
+///         Ok(())
+///     }));
+/// });
+/// // The scope won't exit until all spawned futures are complete.
+/// assert_eq!(v.as_str(), "Hello!");
+/// ```
+pub fn scoped(rt: &tokio::runtime::Runtime) -> ScopeBuilder<'_> {
+    ScopeBuilder::from_runtime(rt)
+}
+
+/// Wrapper type around a tokio Runtime which can be used to create `Scope`s. This type takes
+/// ownership of the Runtime. For an alternative approach that
 ///
 /// See also the [`scope`] function.
 ///
 /// [`scope`]: /tokio-scoped/fn.scope.html
+#[derive(Debug)]
 pub struct ScopedRuntime {
     rt: tokio::runtime::Runtime,
 }
 
+/// Struct used to build scopes from a borrowed Runtime. Generally users should use the [`scoped`]
+/// function instead of building `ScopeBuilder` instances directly.
+///
+/// [`scoped`]: /tokio-scoped/fn.scoped.html
+#[derive(Debug)]
+pub struct ScopeBuilder<'a> {
+    rt: &'a tokio::runtime::Runtime,
+}
+
+#[derive(Debug)]
 pub struct Scope<'a> {
     exec: TaskExecutor,
     send: ManuallyDrop<mpsc::Sender<()>>,
@@ -98,6 +137,8 @@ impl ScopedRuntime {
     pub fn new(rt: tokio::runtime::Runtime) -> Self {
         ScopedRuntime { rt }
     }
+
+    /// Creates a scope bound by the lifetime of `self` that can be used to spawn scoped futures.
     pub fn scope<'a, F, R>(&'a self, f: F) -> R
     where
         F: FnOnce(&mut Scope<'a>) -> R,
@@ -111,6 +152,20 @@ impl ScopedRuntime {
     /// [`Runtime`]: https://docs.rs/tokio/0.1.8/tokio/runtime/struct.Runtime.html
     pub fn into_inner(self) -> tokio::runtime::Runtime {
         self.rt
+    }
+}
+
+impl<'a> ScopeBuilder<'a> {
+    pub fn from_runtime(rt: &'a tokio::runtime::Runtime) -> ScopeBuilder<'a> {
+        ScopeBuilder { rt }
+    }
+
+    pub fn scope<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut Scope<'a>) -> R,
+    {
+        let mut scope = Scope::new(self.rt.executor());
+        f(&mut scope)
     }
 }
 
@@ -347,5 +402,18 @@ mod testing {
             assert_eq!(v2s, &[2, 3, 4, 5, 100]);
             assert_eq!(values, &[1, 2, 3, 4, 100]);
         });
+    }
+
+    #[test]
+    fn borrowed_scope_test() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut values = vec![1, 2, 3, 4];
+        ::scoped(&rt).scope(|scope| {
+            scope.spawn(lazy(|| {
+                values.push(100);
+                Ok(())
+            }));
+        });
+        assert_eq!(values, &[1, 2, 3, 4, 100]);
     }
 }
