@@ -6,9 +6,9 @@ by ensuring each future spawned in the scope completes before the scope exits.
 ## Example
 
 ```rust
-# extern crate tokio_scoped;
-# extern crate futures;
-# use futures::lazy;
+extern crate tokio_scoped;
+extern crate futures;
+use futures::lazy;
 
 let mut v = String::from("Hello");
 tokio_scoped::scope(|scope| {
