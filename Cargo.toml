@@ -2,6 +2,12 @@
 name = "tokio-scoped"
 version = "0.1.0"
 authors = ["Jason Boatman <jasonaboatman@gmail.com>"]
+description = "Scoped Runtime for tokio"
+homepage = "https://github.com/Snnappie/tokio-scoped"
+repository = "https://github.com/Snnappie/tokio-scoped"
+readme = "README.md"
+keywords = ["scope", "tokio", "futures"]
+license = "MIT"
 
 [dependencies]
 tokio = "0.1"
