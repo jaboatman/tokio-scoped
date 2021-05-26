@@ -178,32 +178,6 @@ impl<'a> Scope<'a> {
         self
     }
 
-    /// Blocks the "current thread" of the runtime until `future` resolves. Other spawned futures
-    /// that have been allocated to different threads can make progress while this future is running.
-    pub fn block_on<'s, R, F>(&'s mut self, future: F) -> R
-    where
-        F: Future<Output = R> + Send + 'a,
-        R: Send + Debug + 'a,
-        'a: 's,
-    {
-        let (tx, rx) = futures::channel::oneshot::channel();
-        let future = future.then(move |r| async {
-            tx.send(r).unwrap()
-        });
-        let boxed: Pin<Box<dyn Future<Output = ()> + Send + 'a>> = Box::pin(future);
-        let boxed: Pin<Box<dyn Future<Output = ()> + Send + 'static>> =
-            unsafe { std::mem::transmute(boxed) };
-
-        self.handle.spawn(boxed);
-
-        {
-            let handle = (&*self.handle).clone();
-            tokio::task::block_in_place(move || {
-                handle.block_on(rx)
-            }).unwrap()
-        }
-    }
-
     /// Creates an `inner` scope which can access variables created within the outer scope.
     pub fn scope<'inner, F, R>(&'inner self, f: F) -> R
     where
@@ -286,7 +260,8 @@ mod testing {
         scoped.scope(|scope| {
             scope.spawn(async {
                 let f = scoped
-                    .scope(|scope2| scope2.block_on(async { Ok::<_, ()>(4) }))
+                    .scope(|scope2| async { Ok::<_, ()>(4) })
+                    .await
                     .unwrap();
                 assert_eq!(f, 4);
                 thread::sleep(Duration::from_millis(1000));
@@ -318,24 +293,6 @@ mod testing {
 
         assert_eq!(uncopy.as_str(), "Borrowed!");
         assert_eq!(uncopy2.as_str(), "Borrowedf");
-    }
-
-    #[test]
-    fn block_on_test() {
-        let rt = make_runtime();
-        let scoped = scoped(rt.handle());
-        let mut uncopy = String::from("Borrowed");
-        let captured = scoped.scope(|scope| {
-            let v = scope
-                .block_on(async {
-                    uncopy.push('!');
-                    Ok::<_, ()>(uncopy)
-                })
-                .unwrap();
-            assert_eq!(v.as_str(), "Borrowed!");
-            v
-        });
-        assert_eq!(captured.as_str(), "Borrowed!");
     }
 
     #[test]
