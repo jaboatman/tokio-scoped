@@ -7,16 +7,14 @@
 //!
 //! # Example
 //! ```
-//! use futures::future::lazy;
-//!
 //! #[tokio::main]
 //! async fn main() {
 //!     let mut v = String::from("Hello");
 //!     tokio_scoped::scope(|scope| {
 //!         // Use the scope to spawn the future.
-//!         scope.spawn(lazy(|_| {
+//!         scope.spawn(async {
 //!             v.push('!');
-//!         }));
+//!         });
 //!     });
 //!     // The scope won't exit until all spawned futures are complete.
 //!     assert_eq!(v.as_str(), "Hello!");
@@ -27,37 +25,35 @@
 //!
 //! [`tokio`]: https://tokio.rs/
 //! [`crossbeam::scope`]: https://docs.rs/crossbeam/0.4.1/crossbeam/fn.scope.html
-use futures;
-use tokio;
 
-use futures::channel::mpsc;
+use std::{
+    borrow::Cow,
+    fmt::Debug,
+    future::Future,
+    marker::PhantomData,
+    mem::ManuallyDrop,
+    ops::Deref,
+    pin::Pin,
+    task::{Context, Poll}
+};
+
 use futures::{FutureExt, StreamExt};
-use std::future::Future;
-use std::marker::PhantomData;
-use std::mem::ManuallyDrop;
-use std::ops::Deref;
-use tokio::runtime::Runtime;
+use futures::channel::mpsc;
 use tokio::runtime::Handle;
-use std::task::{Context, Poll};
-use std::pin::Pin;
-use std::fmt::Debug;
-use std::borrow::Cow;
 
 /// Creates a [`Scope`] using the current tokio runtime and calls the `scope` method with the
 /// provided future
 ///
 /// # Example
 /// ```
-/// use futures::future::lazy;
-///
 /// #[tokio::main]
 /// async fn main() {
 ///     let mut v = String::from("Hello");
 ///     tokio_scoped::scope(|scope| {
 ///         // Use the scope to spawn the future.
-///         scope.spawn(lazy(|_| {
+///         scope.spawn(async {
 ///             v.push('!');
-///         }));
+///         });
 ///     });
 ///     // The scope won't exit until all spawned futures are complete.
 ///     assert_eq!(v.as_str(), "Hello!");
@@ -76,15 +72,13 @@ where
 ///
 /// # Example
 /// ```
-/// use futures::future::lazy;
-///
 /// let mut v = String::from("Hello");
 /// let rt = tokio::runtime::Runtime::new().unwrap();
 /// tokio_scoped::scoped(rt.handle()).scope(|scope| {
 ///     // Use the scope to spawn the future.
-///     scope.spawn(lazy(|_| {
+///     scope.spawn(async {
 ///         v.push('!');
-///     }));
+///     });
 /// });
 /// // The scope won't exit until all spawned futures are complete.
 /// assert_eq!(v.as_str(), "Hello!");
@@ -241,9 +235,8 @@ impl<'a> Drop for Scope<'a> {
 #[cfg(test)]
 mod testing {
     use super::*;
-    use futures::future::lazy;
     use std::{thread, time::Duration};
-    use tokio;
+    use tokio::runtime::Runtime;
 
     fn make_runtime() -> Runtime {
         Runtime::new().expect("Failed to construct Runtime")
@@ -254,18 +247,18 @@ mod testing {
         let rt = make_runtime();
         let scoped = scoped(rt.handle());
         scoped.scope(|scope| {
-            scope.spawn(lazy(|_| {
-                tokio::spawn(lazy(|_| {
+            scope.spawn(async {
+                tokio::spawn(async {
                     println!("Another!");
                     thread::sleep(Duration::from_millis(5000));
                     println!("Another is done sleeping");
-                }));
+                });
 
                 println!("Sleeping a spawned future");
                 // We should be able to spawn more and also verify that they complete...
                 thread::sleep(Duration::from_millis(2000));
                 println!("Completing!");
-            }));
+            });
         });
         println!("Completed");
     }
@@ -277,10 +270,10 @@ mod testing {
         // Specifically a variable that does _not_ implement Copy.
         let uncopy = String::from("Borrowed!");
         scoped.scope(|scope| {
-            scope.spawn(lazy(|_| {
+            scope.spawn(async {
                 assert_eq!(uncopy.as_str(), "Borrowed!");
                 println!("Borrowed successfully: {}", uncopy);
-            }));
+            });
         });
     }
 
@@ -291,18 +284,18 @@ mod testing {
         let mut uncopy = String::from("Borrowed");
         let mut uncopy2 = String::from("Borrowed");
         scoped.scope(|scope| {
-            scope.spawn(lazy(|_| {
+            scope.spawn(async {
                 let f = scoped
-                    .scope(|scope2| scope2.block_on(lazy(|_| Ok::<_, ()>(4))))
+                    .scope(|scope2| scope2.block_on(async { Ok::<_, ()>(4) }))
                     .unwrap();
                 assert_eq!(f, 4);
                 thread::sleep(Duration::from_millis(1000));
                 uncopy.push('!');
-            }));
+            });
 
-            scope.spawn(lazy(|_| {
+            scope.spawn(async {
                 uncopy2.push('f');
-            }));
+            });
         });
 
         assert_eq!(uncopy.as_str(), "Borrowed!");
@@ -314,13 +307,13 @@ mod testing {
         let mut uncopy = String::from("Borrowed");
         let mut uncopy2 = String::from("Borrowed");
         scope(|scope| {
-            scope.spawn(lazy(|_| {
+            scope.spawn(async {
                 uncopy.push('!');
-            }));
+            });
 
-            scope.spawn(lazy(|_| {
+            scope.spawn(async {
                 uncopy2.push('f');
-            }));
+            });
         });
 
         assert_eq!(uncopy.as_str(), "Borrowed!");
@@ -334,10 +327,10 @@ mod testing {
         let mut uncopy = String::from("Borrowed");
         let captured = scoped.scope(|scope| {
             let v = scope
-                .block_on(lazy(|_| {
+                .block_on(async {
                     uncopy.push('!');
                     Ok::<_, ()>(uncopy)
-                }))
+                })
                 .unwrap();
             assert_eq!(v.as_str(), "Borrowed!");
             v
@@ -352,9 +345,9 @@ mod testing {
         let mut values = vec![1, 2, 3, 4];
         scoped.scope(|scope| {
             for v in &mut values {
-                scope.spawn(lazy(move |_| {
+                scope.spawn(async move {
                     *v += 1;
-                }));
+                });
             }
         });
 
@@ -369,10 +362,10 @@ mod testing {
         scoped.scope(|scope| {
             let mut v2s = vec![2, 3, 4, 5];
             scope.scope(|scope2| {
-                scope2.spawn(lazy(|_| {
+                scope2.spawn(async {
                     v2s.push(100);
                     values.push(100);
-                }));
+                });
             });
             // The inner scope must exit before we can get here.
             assert_eq!(v2s, &[2, 3, 4, 5, 100]);
@@ -385,9 +378,9 @@ mod testing {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut values = vec![1, 2, 3, 4];
         ScopeBuilder::from_runtime(&rt).scope(|scope| {
-            scope.spawn(lazy(|_| {
+            scope.spawn(async {
                 values.push(100);
-            }));
+            });
         });
         assert_eq!(values, &[1, 2, 3, 4, 100]);
     }
