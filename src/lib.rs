@@ -259,10 +259,7 @@ mod testing {
         let mut uncopy2 = String::from("Borrowed");
         scoped.scope(|scope| {
             scope.spawn(async {
-                let f = scoped
-                    .scope(|scope2| async { Ok::<_, ()>(4) })
-                    .await
-                    .unwrap();
+                let f = scoped.scope(|scope2| async { 4 }).await;
                 assert_eq!(f, 4);
                 thread::sleep(Duration::from_millis(1000));
                 uncopy.push('!');
