@@ -34,11 +34,11 @@ use std::{
     mem::ManuallyDrop,
     ops::Deref,
     pin::Pin,
-    task::{Context, Poll}
+    task::{Context, Poll},
 };
 
 use tokio::{runtime::Handle, sync::mpsc, sync::oneshot};
-use tokio_stream::{StreamExt, wrappers::UnboundedReceiverStream};
+use tokio_stream::{wrappers::UnboundedReceiverStream, StreamExt};
 
 /// Creates a [`Scope`] using the current tokio runtime and calls the `scope` method with the
 /// provided future
@@ -83,7 +83,9 @@ where
 /// assert_eq!(v.as_str(), "Hello!");
 /// ```
 pub fn scoped(tokio_handle: &Handle) -> ScopeBuilder<'_> {
-    ScopeBuilder { handle: tokio_handle }
+    ScopeBuilder {
+        handle: tokio_handle,
+    }
 }
 
 /// Struct used to build scopes from a borrowed `Handle`. Generally users should use the [`scoped`]
@@ -120,7 +122,9 @@ impl<'a> Scope<'a> {
 
 impl<'a> ScopeBuilder<'a> {
     pub fn from_runtime(rt: &'a tokio::runtime::Runtime) -> ScopeBuilder<'a> {
-        ScopeBuilder { handle: rt.handle() }
+        ScopeBuilder {
+            handle: rt.handle(),
+        }
     }
 
     pub fn scope<F, R>(&self, f: F) -> R
@@ -191,15 +195,13 @@ impl<'a> Scope<'a> {
     /// spawned futures will be moved to different threads and can make progress while
     /// this future is running.
     pub fn block_on<'s, R, F>(&'s mut self, future: F) -> R
-        where
-            F: Future<Output = R> + Send + 'a,
-            R: Send + Debug + 'a,
-            'a: 's,
+    where
+        F: Future<Output = R> + Send + 'a,
+        R: Send + Debug + 'a,
+        'a: 's,
     {
         let (tx, rx) = oneshot::channel();
-        let future = async move {
-            tx.send(future.await).unwrap()
-        };
+        let future = async move { tx.send(future.await).unwrap() };
 
         let boxed: Pin<Box<dyn Future<Output = ()> + Send + 'a>> = Box::pin(future);
         let boxed: Pin<Box<dyn Future<Output = ()> + Send + 'static>> =
@@ -208,9 +210,7 @@ impl<'a> Scope<'a> {
         self.handle.spawn(boxed);
         {
             let handle = self.handle().clone();
-            tokio::task::block_in_place(move || {
-                handle.block_on(rx)
-            }).unwrap()
+            tokio::task::block_in_place(move || handle.block_on(rx)).unwrap()
         }
     }
 
@@ -229,11 +229,9 @@ impl<'a> Drop for Scope<'a> {
         let recv = self.recv.take().unwrap();
 
         let n = match Handle::try_current() {
-            Ok(handle) => {
-                tokio::task::block_in_place(move || {
-                    handle.block_on(UnboundedReceiverStream::new(recv).next())
-                })
-            }
+            Ok(handle) => tokio::task::block_in_place(move || {
+                handle.block_on(UnboundedReceiverStream::new(recv).next())
+            }),
             Err(_) => {
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .build()
