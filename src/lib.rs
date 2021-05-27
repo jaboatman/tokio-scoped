@@ -37,9 +37,8 @@ use std::{
     task::{Context, Poll}
 };
 
-use futures::{FutureExt, StreamExt};
-use futures::channel::mpsc;
-use tokio::runtime::Handle;
+use tokio::{runtime::Handle, sync::mpsc, sync::oneshot};
+use tokio_stream::{StreamExt, wrappers::UnboundedReceiverStream};
 
 /// Creates a [`Scope`] using the current tokio runtime and calls the `scope` method with the
 /// provided future
@@ -99,17 +98,17 @@ pub struct ScopeBuilder<'a> {
 #[derive(Debug)]
 pub struct Scope<'a> {
     handle: Cow<'a, Handle>,
-    send: ManuallyDrop<mpsc::Sender<()>>,
+    send: ManuallyDrop<mpsc::UnboundedSender<()>>,
     // When the `Scope` is dropped, we wait on this receiver to close. No messages are sent through
     // the receiver, however, the `Sender` objects get cloned into each spawned future (see
     // `ScopedFuture`). This is how we ensure they all exit eventually.
-    recv: Option<mpsc::Receiver<()>>,
+    recv: Option<mpsc::UnboundedReceiver<()>>,
     _marker: PhantomData<&'a ()>,
 }
 
 impl<'a> Scope<'a> {
     fn new<'b: 'a>(handle: Cow<'b, Handle>) -> Scope<'a> {
-        let (s, r) = mpsc::channel(0);
+        let (s, r) = mpsc::unbounded_channel();
         Scope {
             handle,
             send: ManuallyDrop::new(s),
@@ -135,7 +134,7 @@ impl<'a> ScopeBuilder<'a> {
 
 struct ScopedFuture {
     f: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
-    _marker: mpsc::Sender<()>,
+    _marker: mpsc::UnboundedSender<()>,
 }
 
 impl Future for ScopedFuture {
@@ -188,9 +187,36 @@ impl<'a> Scope<'a> {
         f(&mut scope)
     }
 
+    /// Blocks the "current thread" of the runtime until `future` resolves. Other independently
+    /// spawned futures will be moved to different threads and can make progress while
+    /// this future is running.
+    pub fn block_on<'s, R, F>(&'s mut self, future: F) -> R
+        where
+            F: Future<Output = R> + Send + 'a,
+            R: Send + Debug + 'a,
+            'a: 's,
+    {
+        let (tx, rx) = oneshot::channel();
+        let future = async move {
+            tx.send(future.await).unwrap()
+        };
+
+        let boxed: Pin<Box<dyn Future<Output = ()> + Send + 'a>> = Box::pin(future);
+        let boxed: Pin<Box<dyn Future<Output = ()> + Send + 'static>> =
+            unsafe { std::mem::transmute(boxed) };
+
+        self.handle.spawn(boxed);
+        {
+            let handle = self.handle().clone();
+            tokio::task::block_in_place(move || {
+                handle.block_on(rx)
+            }).unwrap()
+        }
+    }
+
     /// Get a `Handle` to the underlying `Runtime` instance.
-    pub fn handle(&self) -> Handle {
-        (&*self.handle).clone()
+    pub fn handle(&self) -> &Handle {
+        &*self.handle
     }
 }
 
@@ -200,17 +226,32 @@ impl<'a> Drop for Scope<'a> {
             ManuallyDrop::drop(&mut self.send);
         }
 
-        let mut recv = self.recv.take().unwrap();
-        let n = futures::executor::block_on(recv.next());
+        let recv = self.recv.take().unwrap();
+
+        let n = match Handle::try_current() {
+            Ok(handle) => {
+                tokio::task::block_in_place(move || {
+                    handle.block_on(UnboundedReceiverStream::new(recv).next())
+                })
+            }
+            Err(_) => {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .expect("Failed to build a tokio runtime");
+                rt.block_on(UnboundedReceiverStream::new(recv).next())
+            }
+        };
         assert_eq!(n, None);
     }
 }
 
 #[cfg(test)]
 mod testing {
-    use super::*;
     use std::{thread, time::Duration};
+
     use tokio::runtime::Runtime;
+
+    use super::*;
 
     fn make_runtime() -> Runtime {
         Runtime::new().expect("Failed to construct Runtime")
@@ -259,7 +300,7 @@ mod testing {
         let mut uncopy2 = String::from("Borrowed");
         scoped.scope(|scope| {
             scope.spawn(async {
-                let f = scoped.scope(|scope2| async { 4 }).await;
+                let f = scoped.scope(|scope2| scope2.block_on(async { 4 }));
                 assert_eq!(f, 4);
                 thread::sleep(Duration::from_millis(1000));
                 uncopy.push('!');
@@ -290,6 +331,24 @@ mod testing {
 
         assert_eq!(uncopy.as_str(), "Borrowed!");
         assert_eq!(uncopy2.as_str(), "Borrowedf");
+    }
+
+    #[test]
+    fn block_on_test() {
+        let rt = make_runtime();
+        let scoped = scoped(rt.handle());
+        let mut uncopy = String::from("Borrowed");
+        let captured = scoped.scope(|scope| {
+            let v = scope
+                .block_on(async {
+                    uncopy.push('!');
+                    Ok::<_, ()>(uncopy)
+                })
+                .unwrap();
+            assert_eq!(v.as_str(), "Borrowed!");
+            v
+        });
+        assert_eq!(captured.as_str(), "Borrowed!");
     }
 
     #[test]
