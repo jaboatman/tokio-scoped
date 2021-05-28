@@ -227,18 +227,9 @@ impl<'a> Drop for Scope<'a> {
         }
 
         let recv = self.recv.take().unwrap();
-
-        let n = match Handle::try_current() {
-            Ok(handle) => tokio::task::block_in_place(move || {
-                handle.block_on(UnboundedReceiverStream::new(recv).next())
-            }),
-            Err(_) => {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .build()
-                    .expect("Failed to build a tokio runtime");
-                rt.block_on(UnboundedReceiverStream::new(recv).next())
-            }
-        };
+        let n = tokio::task::block_in_place(move || {
+            self.handle.block_on(UnboundedReceiverStream::new(recv).next())
+        });
         assert_eq!(n, None);
     }
 }
