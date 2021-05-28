@@ -236,11 +236,10 @@ impl<'a> Drop for Scope<'a> {
 
 #[cfg(test)]
 mod testing {
-    use std::{thread, time::Duration};
-
-    use tokio::runtime::Runtime;
-
     use super::*;
+
+    use std::time::Duration;
+    use tokio::runtime::Runtime;
 
     fn make_runtime() -> Runtime {
         Runtime::new().expect("Failed to construct Runtime")
@@ -252,15 +251,37 @@ mod testing {
         let scoped = scoped(rt.handle());
         scoped.scope(|scope| {
             scope.spawn(async {
-                tokio::spawn(async {
+                let another = tokio::spawn(async {
                     println!("Another!");
-                    thread::sleep(Duration::from_millis(5000));
+                    tokio::time::sleep(Duration::from_millis(5000)).await;
                     println!("Another is done sleeping");
                 });
 
                 println!("Sleeping a spawned future");
                 // We should be able to spawn more and also verify that they complete...
-                thread::sleep(Duration::from_millis(2000));
+                tokio::time::sleep(Duration::from_millis(2000)).await;
+                println!("Completing!");
+                another.await.unwrap();
+            });
+        });
+        println!("Completed");
+    }
+
+    #[test]
+    fn basic_test_split() {
+        let rt = make_runtime();
+        let scoped = scoped(rt.handle());
+        scoped.scope(|scope| {
+            scope.spawn(async {
+                println!("Another!");
+                tokio::time::sleep(Duration::from_millis(5000)).await;
+                println!("Another is done sleeping");
+            });
+
+            println!("Sleeping a spawned future");
+            scope.spawn(async {
+                // We should be able to spawn more and also verify that they complete...
+                tokio::time::sleep(Duration::from_millis(2000)).await;
                 println!("Completing!");
             });
         });
@@ -291,7 +312,7 @@ mod testing {
             scope.spawn(async {
                 let f = scoped.scope(|scope2| scope2.block_on(async { 4 }));
                 assert_eq!(f, 4);
-                thread::sleep(Duration::from_millis(1000));
+                tokio::time::sleep(Duration::from_millis(1000)).await;
                 uncopy.push('!');
             });
 
