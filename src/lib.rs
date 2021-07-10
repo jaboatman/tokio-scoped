@@ -27,7 +27,6 @@
 //! [`crossbeam::scope`]: https://docs.rs/crossbeam/0.4.1/crossbeam/fn.scope.html
 
 use std::{
-    borrow::Cow,
     fmt::Debug,
     future::Future,
     marker::PhantomData,
@@ -62,7 +61,7 @@ pub fn scope<'a, F, R>(f: F) -> R
 where
     F: FnOnce(&mut Scope<'a>) -> R,
 {
-    let mut scope = Scope::new(Cow::Owned(Handle::current()));
+    let mut scope = Scope::new(Handle::current());
     f(&mut scope)
 }
 
@@ -99,7 +98,7 @@ pub struct ScopeBuilder<'a> {
 
 #[derive(Debug)]
 pub struct Scope<'a> {
-    handle: Cow<'a, Handle>,
+    handle: Handle,
     send: ManuallyDrop<mpsc::UnboundedSender<()>>,
     // When the `Scope` is dropped, we wait on this receiver to close. No messages are sent through
     // the receiver, however, the `Sender` objects get cloned into each spawned future (see
@@ -109,7 +108,7 @@ pub struct Scope<'a> {
 }
 
 impl<'a> Scope<'a> {
-    fn new<'b: 'a>(handle: Cow<'b, Handle>) -> Scope<'a> {
+    fn new<'b: 'a>(handle: Handle) -> Scope<'a> {
         let (s, r) = mpsc::unbounded_channel();
         Scope {
             handle,
@@ -131,7 +130,7 @@ impl<'a> ScopeBuilder<'a> {
     where
         F: FnOnce(&mut Scope<'a>) -> R,
     {
-        let mut scope = Scope::new(Cow::Borrowed(self.handle));
+        let mut scope = Scope::new(self.handle.clone());
         f(&mut scope)
     }
 }
@@ -216,7 +215,7 @@ impl<'a> Scope<'a> {
 
     /// Get a `Handle` to the underlying `Runtime` instance.
     pub fn handle(&self) -> &Handle {
-        &*self.handle
+        &self.handle
     }
 }
 
