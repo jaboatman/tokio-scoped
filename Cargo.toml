@@ -1,14 +1,18 @@
 [package]
 name = "tokio-scoped"
-version = "0.1.0"
-authors = ["Jason Boatman <jasonaboatman@gmail.com>"]
+version = "0.2.0"
+authors = ["Jason Boatman <jasonaboatman@gmail.com>", "Nick Webster <nick@nick.geek.nz>"]
 description = "Scoped Runtime for tokio"
 homepage = "https://github.com/Snnappie/tokio-scoped"
 repository = "https://github.com/Snnappie/tokio-scoped"
 readme = "README.md"
 keywords = ["scope", "tokio", "futures"]
 license = "MIT"
+edition = "2018"
 
 [dependencies]
-tokio = "0.1"
-futures = "0.1"
+tokio = { version = "1.6.0", features = ["rt-multi-thread"] }
+tokio-stream = "~0.1.6"
+
+[dev-dependencies]
+tokio = { version = "1.6.0", features = ["rt-multi-thread", "test-util", "macros", "time"] }
