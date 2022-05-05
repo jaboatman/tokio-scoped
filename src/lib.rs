@@ -225,7 +225,7 @@ impl<'a> Drop for Scope<'a> {
         }
 
         let mut recv = self.recv.take().unwrap();
-        let n = tokio::task::block_in_place(move || self.handle.block_on(recv.recv()));
+        let n = tokio::task::block_in_place(|| recv.blocking_recv());
         assert_eq!(n, None);
     }
 }
