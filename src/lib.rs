@@ -37,7 +37,6 @@ use std::{
 };
 
 use tokio::{runtime::Handle, sync::mpsc, sync::oneshot};
-use tokio_stream::{wrappers::UnboundedReceiverStream, StreamExt};
 
 /// Creates a [`Scope`] using the current tokio runtime and calls the `scope` method with the
 /// provided future
@@ -225,10 +224,8 @@ impl<'a> Drop for Scope<'a> {
             ManuallyDrop::drop(&mut self.send);
         }
 
-        let recv = self.recv.take().unwrap();
-        let n = tokio::task::block_in_place(move || {
-            self.handle.block_on(UnboundedReceiverStream::new(recv).next())
-        });
+        let mut recv = self.recv.take().unwrap();
+        let n = tokio::task::block_in_place(move || self.handle.block_on(recv.recv()));
         assert_eq!(n, None);
     }
 }
