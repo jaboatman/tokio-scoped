@@ -1,4 +1,6 @@
 # tokio-scoped
+**Please Consider Using [async_scoped](https://docs.rs/async-scoped/latest/async_scoped/) instead.**
+
 tokio-scoped provides a `scope` function inspired by [crossbeam](https://docs.rs/crossbeam/0.8.0/crossbeam/fn.scope.html)
 but for the [`tokio`](https://tokio.rs/) Runtime. A scope allows one to spawn futures which do not have a `'static` lifetime
 by ensuring each future spawned in the scope completes before the scope exits.
