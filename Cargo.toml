@@ -12,7 +12,6 @@ edition = "2018"
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread"] }
-tokio-stream = "0.1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "test-util", "macros", "time"] }
