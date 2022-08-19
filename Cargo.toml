@@ -11,7 +11,8 @@ license = "MIT"
 edition = "2018"
 
 [dependencies]
-tokio = { version = "1.6.0", features = ["rt-multi-thread"] }
+tokio = { version = "1", features = ["rt-multi-thread"] }
 
 [dev-dependencies]
-tokio = { version = "1.6.0", features = ["rt-multi-thread", "test-util", "macros", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "test-util", "macros", "time"] }
+async-recursion = "1"
