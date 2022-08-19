@@ -108,7 +108,7 @@ pub struct Scope<'a> {
 }
 
 impl<'a> Scope<'a> {
-    fn new<'b: 'a>(handle: Handle) -> Scope<'a> {
+    fn new(handle: Handle) -> Scope<'a> {
         let (s, r) = mpsc::unbounded_channel();
         Scope {
             handle,
@@ -135,13 +135,13 @@ impl<'a> ScopeBuilder<'a> {
     }
 }
 
-struct ScopedFuture {
-    f: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
-    _marker: mpsc::UnboundedSender<()>,
+struct ScopedFuture<T> {
+    f: Pin<Box<dyn Future<Output = T> + Send + Sync + 'static>>,
+    _send_waiter: mpsc::UnboundedSender<()>,
 }
 
-impl Future for ScopedFuture {
-    type Output = ();
+impl<T> Future for ScopedFuture<T> {
+    type Output = T;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let inner_future = &mut self.f;
@@ -150,34 +150,58 @@ impl Future for ScopedFuture {
     }
 }
 
+pub struct JoinHandle<'a, T: 'a> {
+    task: tokio::task::JoinHandle<T>,
+    _marker: std::marker::PhantomData<&'a T>,
+}
+
+impl<'a, T: 'a> Future for JoinHandle<'a, T> {
+    type Output = std::result::Result<T, tokio::task::JoinError>;
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let f = &mut self.task;
+        tokio::pin!(f);
+        f.poll(cx)
+    }
+}
+
+impl<'a, T> JoinHandle<'a, T> {
+    pub fn abort(&self) {
+        self.task.abort();
+    }
+}
+
 impl<'a> Scope<'a> {
-    fn scoped_future<'s, F>(&'s self, f: F) -> ScopedFuture
+    fn scoped_future<'s, F, T>(&'s self, f: F) -> ScopedFuture<T>
     where
-        F: Future<Output = ()> + Send + 'a,
+        F: Future + Send + 'a,
+        F::Output: Send + 'static,
         'a: 's,
     {
-        let boxed: Pin<Box<dyn Future<Output = ()> + Send + 'a>> = Box::pin(f);
+        let boxed: Pin<Box<dyn Future<Output = F::Output> + Send + 'a>> = Box::pin(f);
         // This transmute should be safe, as we use the `ScopedFuture` abstraction to prevent the
         // scope from exiting until every spawned `ScopedFuture` object is dropped, signifying that
         // they have completed their execution.
-        let boxed: Pin<Box<dyn Future<Output = ()> + Send + 'static>> =
+        let boxed: Pin<Box<dyn Future<Output = T> + Send + Sync + 'static>> =
             unsafe { std::mem::transmute(boxed) };
 
         ScopedFuture {
             f: boxed,
-            _marker: self.send.deref().clone(),
+            _send_waiter: self.send.deref().clone(),
         }
     }
 
     /// Spawn the provided future on the `Handle` to the tokio `Runtime`.
-    pub fn spawn<'s, F>(&'s mut self, future: F) -> &mut Self
+    pub fn spawn<F>(&mut self, future: F) -> JoinHandle<'a, F::Output>
     where
-        F: Future<Output = ()> + Send + 'a,
-        'a: 's,
+        F: Future + Send + 'a,
+        F::Output: Send + 'static,
     {
         let scoped_f = self.scoped_future(future);
-        self.handle.spawn(scoped_f);
-        self
+        let handle = self.handle.spawn(scoped_f);
+        JoinHandle {
+            task: handle,
+            _marker: std::marker::PhantomData,
+        }
     }
 
     /// Creates an `inner` scope which can access variables created within the outer scope.
@@ -227,7 +251,8 @@ impl<'a> Drop for Scope<'a> {
 
         let recv = self.recv.take().unwrap();
         let n = tokio::task::block_in_place(move || {
-            self.handle.block_on(UnboundedReceiverStream::new(recv).next())
+            self.handle
+                .block_on(UnboundedReceiverStream::new(recv).next())
         });
         assert_eq!(n, None);
     }
@@ -405,5 +430,45 @@ mod testing {
             });
         });
         assert_eq!(values, &[1, 2, 3, 4, 100]);
+    }
+
+    #[test]
+    fn recursive_test() {
+        #[async_recursion::async_recursion]
+        async fn recursive(data: &mut String, count: usize) {
+            if count == 10 {
+                return;
+            }
+            data.push('a');
+            recursive(data, count + 1).await;
+        }
+        let rt = make_runtime();
+        let scoped = scoped(rt.handle());
+        let mut data = String::new();
+        scoped.scope(|scope| {
+            scope.spawn(async {
+                recursive(&mut data, 0).await;
+            });
+        });
+        assert_eq!(data, "aaaaaaaaaa");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn recursive_test2() {
+        #[async_recursion::async_recursion]
+        async fn recursive(data: &mut String, count: usize) {
+            if count == 10 {
+                return;
+            }
+            super::scope(|scope| {
+                scope.spawn(async {
+                    recursive(data, count + 1).await;
+                });
+            });
+            data.push('a');
+        }
+        let mut data = String::new();
+        recursive(&mut data, 0).await;
+        assert_eq!(data, "aaaaaaaaaa");
     }
 }
